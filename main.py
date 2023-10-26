@@ -25,6 +25,16 @@ class Keel:
         self.session = requests.Session()
         self.session.auth = (username, password)
 
+    def approve(self, identifier):
+        return self.session.post(
+            self._endpoint(self.Endpoint.APPROVALS),
+            data={
+                'identifier': identifier,
+                'action': 'approve',
+                'voter': 'keel-ha-bridge',
+            },
+        )
+
     def pending_approvals(self):
         return self.session.get(
             self._endpoint(self.Endpoint.APPROVALS)
@@ -42,6 +52,9 @@ class FakeKeel(Keel):
 
     def __init__(self, *args):
         pass
+
+    def approve(self, identifier):
+        print(f'Approving {identifier}')
 
     def pending_approvals(self):
         return [
@@ -115,7 +128,7 @@ def poll_keel(poll_interval: int, keel_client: Keel, mqtt_client):
                     'sw_version': '1.0',
                     'support_url': 'https://github.com/craigcabrey/keel-ha-bridge',
                 },
-                'payload_install': identifier,
+                'payload_install': approval['identifier'],
                 'state_topic': state_topic,
                 'unique_id': identifier,
             }
@@ -125,23 +138,21 @@ def poll_keel(poll_interval: int, keel_client: Keel, mqtt_client):
         time.sleep(poll_interval)
 
 
-# The callback for when the client receives a CONNACK response from the server.
 def on_connect(client, userdata, flags, rc):
-    print("Connected with result code "+str(rc))
-
-    # Subscribing in on_connect() means that if we lose the connection and
-    # reconnect then subscriptions will be renewed.
-    client.subscribe("$SYS/#")
+    print(f'Connected to MQTT ({rc})')
+    client.subscribe('keel/approvals')
 
 
-# The callback for when a PUBLISH message is received from the server.
-def on_message(client, userdata, msg):
-    print(msg.topic+" "+str(msg.payload))
-
-
-def init_mqqt(args):
+def init_mqqt(args, keel_client):
     mqqt_client = mqtt.Client()
     mqqt_client.on_connect = on_connect
+
+    def on_message(client, userdata, msg):
+        print(f'{msg.topic} {msg.payload}')
+
+        identifier = msg.payload.decode('utf-8')
+        keel_client.approve(identifier)
+
     mqqt_client.on_message = on_message
 
     mqqt_client.username_pw_set(args.mqtt_username, password=args.mqtt_password)
@@ -158,12 +169,12 @@ def init_mqqt(args):
 def main():
     args = parse_args()
 
-    mqqt_client = init_mqqt(args)
-
     if args.keel_stub:
         keel_client = FakeKeel()
     else:
         keel_client = Keel(args.keel_username, args.keel_password, args.keel_service, args.keel_port)
+
+    mqqt_client = init_mqqt(args, keel_client)
 
     keel_poll = threading.Thread(target=poll_keel, args=(args.keel_poll_interval, keel_client, mqqt_client))
     keel_poll.start()
